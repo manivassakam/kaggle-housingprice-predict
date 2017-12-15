@@ -1,0 +1,227 @@
+---
+title: "DataMining Housing Price Prediction"
+author: "M Manivassakam"
+date: "March 6, 2017"
+output: html_document
+---
+
+```{r}
+
+# Get the Data In
+dataPath <- "C:/myAssignment/kaggle/housingprice/"
+House.Data <- read.csv(file=paste(dataPath,"FixedHouseDataIndicator.csv",sep ="/"),header=TRUE,sep=",")
+str(House.Data)
+#summary(House.Data)
+head(House.Data)
+colnames(House.Data)
+
+House.Data$SalePriceB <- NULL
+# Formula for sampling
+set.seed(808)
+Sample.Size <- floor(0.7 * nrow(House.Data))
+Index <- sample(seq_len(nrow(House.Data)), size = Sample.Size)
+Train <- House.Data[Index, ]
+Holdout <- House.Data[-Index, ]
+
+
+```
+# Baseline Linear Regression Model
+```{r}
+
+base.lm.full.model <- lm(SalePrice ~ ., data=Train)
+summary(base.lm.full.model)
+plot(base.lm.full.model)
+
+# Pick the significant variables alone
+
+# Identify siginficant variables and drop non-siginficant variables based on p-values
+
+#Rsquare value
+summary(base.lm.full.model)$r.square
+
+# Sum of Squared Errors
+baseTrainSSE = sum(base.lm.full.model$residuals^2)
+# Root mean squared error
+baseTrainRMSE = sqrt(baseTrainSSE/nrow(Train))
+baseTrainRMSE
+
+
+Holdout.pred <- predict(base.lm.full.model, newdata = Holdout, type="response")
+
+# Compute out-of-sample R^2
+baseTestSSE = sum((Holdout.pred - Holdout$SalePrice)^2)
+baseTestSST = sum((mean(Train$SalePrice) - Holdout$SalePrice)^2)
+Holdout.R2 = 1 - baseTestSSE/baseTestSST
+Holdout.R2
+
+# Compute the RMSE
+Holdout.RMSE = sqrt(baseTestSSE/nrow(Holdout))
+Holdout.RMSE
+
+```
+# Use the trained Model to make predictions in Holdout Data.
+```{r}
+
+sig.var<- summary(base.lm.full.model)$coeff[-1,4] < 0.05 # credit to kith
+
+
+# select sig. variables
+relevant.x <- names(sig.var)[sig.var == TRUE] 
+# formula with only sig variables
+relevant.x 
+sig.formula <- as.formula(paste("SalePrice ~",paste(relevant.x, collapse= "+")))
+sig.formula
+base.lm.sig.model <- lm(sig.formula,data=Train)
+summary(base.lm.sig.model)
+
+#Rsquare value
+summary(base.lm.sig.model)$r.square
+
+# Sum of Squared Errors
+SSE = sum(base.lm.sig.model$residuals^2)
+# Root mean squared error
+RMSE = sqrt(SSE/nrow(Train))
+RMSE
+
+#Make predictions on test set
+
+Holdout.pred <- predict(base.lm.sig.model, newdata = Holdout, type="response")
+
+# Compute out-of-sample R^2
+sigSSE = sum((Holdout.pred - Holdout$SalePrice)^2)
+SST = sum((mean(Train$SalePrice) - Holdout$SalePrice)^2)
+Holdout.R2 = 1 - SSE/SST
+Holdout.R2
+
+# Compute the RMSE
+Holdout.RMSE = sqrt(sigSSE/nrow(Holdout))
+Holdout.RMSE
+
+# The R2 Value in Holdout dramatically drops to 0.57 , which for the training set was 0.891.
+# This shows the model does not generalize well for the test dataset.
+
+
+```
+```{r}
+# Now lets try a RandomForest Model
+library(randomForest)
+library(party)
+library(ROCR)
+model_rf <- randomForest(SalePrice ~., data=Train,ntree=500,max_depth=100)
+
+rfvalpred = predict(model_rf,newdata=Holdout)
+rfrmse = sqrt(mean((Holdout$SalePrice-rfvalpred)^2))
+rfrmse
+
+summary(model_rf)
+print(model_rf)
+importance(model_rf)
+
+varImpPlot(model_rf)
+
+```
+
+```{r}
+
+library(xgboost)
+library(readr)
+library(stringr)
+library(caret)
+library(car)
+
+```
+
+
+```{r}
+# XGBoost Method
+#XGBoost only works with numeric vectors.
+# The spare matrix command converts all categorical variables into numerical value
+# using one-hot encoding method.
+
+#Create matrices from the data frames
+trainData <- as.matrix(Train, rownames.force=NA)
+testData <- as.matrix(Holdout, rownames.force=NA)
+
+#Turn the matrices into sparse matrices
+train2 <- as(trainData, "sparseMatrix")
+test2 <- as(testData, "sparseMatrix")
+
+#####
+colnames(train2)
+#Cross Validate the model
+
+vars <- relevant.x #choose the columns we want to use in the prediction matrix
+
+trainD <- xgb.DMatrix(data = train2[,vars], label = train2[,"SalePrice"]) #Convert to xgb.DMatrix format
+
+#Cross validate the model
+cv.sparse <- xgb.cv(data = trainD,
+                    nrounds = 600,
+                    min_child_weight = 0,
+                    max_depth = 10,
+                    eta = 0.02,
+                    subsample = .7,
+                    colsample_bytree = .7,
+                    booster = "gbtree",
+                    eval_metric = "rmse",
+                    verbose = TRUE,
+                    print_every_n = 50,
+                    nfold = 4,
+                    nthread = 2,
+                    objective="reg:linear")
+```
+
+```{r}
+
+#Train the model
+
+#Choose the parameters for the model
+param <- list(colsample_bytree = .7,
+             subsample = .7,
+             booster = "gbtree",
+             max_depth = 10,
+             eta = 0.02,
+             eval_metric = "rmse",
+             objective="reg:linear")
+
+
+#Train the model using those parameters
+bstSparse <-
+  xgb.train(params = param,
+            data = trainD,
+            nrounds = 600,
+            watchlist = list(train = trainD),
+            verbose = TRUE,
+            print_every_n = 50,
+            nthread = 2)
+
+
+```
+```{r}
+
+#Predict and test the RMSE.
+
+testD <- xgb.DMatrix(data = test2[,vars])
+#Column names must match the inputs EXACTLY
+prediction <- predict(bstSparse, testD) #Make the prediction based on the half of the training data set aside
+
+#Put testing prediction and test dataset all together
+test3 <- as.data.frame(as.matrix(test2))
+prediction <- as.data.frame(as.matrix(prediction))
+colnames(prediction) <- "prediction"
+model_output <- cbind(test3, prediction)
+
+#model_output$log_prediction <- log(model_output$prediction)
+#model_output$log_SalePrice <- log(model_output$SalePrice)
+
+#Test with RMSE
+library(Metrics)
+#rmse(model_output$log_SalePrice,model_output$log_prediction)
+rmse(model_output$SalePrice,model_output$prediction)
+
+
+```
+
+
+
+
